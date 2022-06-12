@@ -1,0 +1,5 @@
+#!/bin/bash
+
+cd $1
+echo $1
+exec unicom-python-bin ./
