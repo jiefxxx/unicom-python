@@ -16,8 +16,10 @@ async fn main() -> PyResult<()> {
     let args: Vec<String> = env::args().collect();
     let app = Arc::new(App::new(args[1].clone()));
     let close_notify = Arc::new(Notify::new());
+
     let n_config = app.initialize().await;
-    let stream = UnixStream::connect("/tmp/test3.stream").await.unwrap();
+    
+    let stream = UnixStream::connect("/var/unicom/test3.stream").await.unwrap();
     let (mut reader,mut writer) = stream.into_split();
     write_init(&mut writer, &n_config).await.unwrap();
     let writer = Arc::new(Mutex::new(writer));

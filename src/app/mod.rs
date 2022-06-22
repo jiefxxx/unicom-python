@@ -1,4 +1,5 @@
 use std::{path::Path, sync::Arc};
+use pyo3::types::PyBytes;
 use pyo3::{prelude::*, types::PyList, create_exception, exceptions::PyException};
 use pyo3::{PyErr, PyErrArguments};
 use serde_json::Value;
@@ -22,13 +23,6 @@ create_exception!(unicom, NotAllowed, PyException);
 create_exception!(unicom, MethodNotAllowed, PyException);
 create_exception!(unicom, Empty, PyException);
 
-#[pymodule]
-fn unicom(py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    m.add("UnicomPyError", py.get_type::<UnicomPyError>())?;
-    m.add("NotFound", py.get_type::<NotFound>())?;
-
-    Ok(())
-}
 
 #[derive(Debug)]
 pub enum PythonMessage{
@@ -37,6 +31,11 @@ pub enum PythonMessage{
         data: UnicomRequest
     },
     Quit
+}
+
+enum PythonReturn{
+    Binary(Vec<u8>),
+    Value(Value),
 }
 
 pub struct App{
@@ -71,17 +70,25 @@ impl App{
         let path = Path::new(&self.path);
         let code = fs::read_to_string(path.join("app.py")).await.unwrap();
 
-        let p_config = Python::with_gil(|py| -> PyResult<PythonConfig> {
+        let p_config_fut = Python::with_gil(|py| -> PyResult<_> {
 
             py.import("sys")?.getattr("path")?
                 .downcast::<PyList>()?
                 .insert(0, &self.path)?;
             
+                let config_fct = PyModule::from_code(py, &code, "app.py", "")?.getattr("config")?;
 
-            Ok(PyModule::from_code(py, &code, "app.py", "")?
-                .getattr("config")?
-                .call((&self.server,), None)?
-                .extract()?)
+                let fut = pyo3_asyncio::tokio::into_future(config_fct.call((&self.server,), None)?)?;
+                
+                Ok(fut)
+
+        }).unwrap();
+
+        let ret = p_config_fut.await.unwrap();
+
+        let p_config = Python::with_gil(|py| -> PyResult<PythonConfig> {
+
+            Ok(ret.extract(py)?)
 
         }).unwrap();
 
@@ -98,34 +105,42 @@ impl App{
         let api_objects = self.api_objects.lock().await;
         let api = api_objects[request.id as usize].clone();
         drop(api_objects);
-        let value = match Python::with_gil(|py| -> PyResult<_> {
+
+        let ret = match Python::with_gil(|py| -> PyResult<_> {
             let method: &str = request.method.clone().into();
             let fct = api.getattr(py, method)?;
-            let parameters = request.parameters.clone();
-            pyo3_asyncio::tokio::into_future(PYTHON_EXECUTE.call1(py,(fct, pythonize(py, &parameters)?, &self.server,))?.as_ref(py))
+            pyo3_asyncio::tokio::into_future(PYTHON_EXECUTE.call1(py,(fct, pythonize(py, &request.parameters)?, &self.server,))?.as_ref(py))
         }){
-            Ok(value) => value,
-            Err(e) => return Err(e.into()),
-        };
-        
-        let ret = match value.await{
-            Ok(ret) => ret,
-            Err(e) => return Err(e.into()),
-        };
-        let ret_value = match Python::with_gil(|py| -> PyResult<Value> {
-            Ok(depythonize(ret.as_ref(py))?)
-        }){
-            Ok(ret_value) => ret_value,
-            Err(e) => return Err(e.into()),
-        };
-        
-        match serde_json::to_string(&ret_value){
-            Ok(v) => Ok(v.as_bytes().to_vec()),
-            Err(e) => {
-                let error: UnicomError = e.into();
-                Err(error.into())
+            Ok(value) => {
+                match value.await{
+                    Ok(ret) => ret,
+                    Err(e) => return Err(e.into()),
+                }
             },
+            Err(e) => return Err(e.into()),
+        };
+
+        match Python::with_gil(|py| -> PyResult<PythonReturn> {
+            match ret.cast_as::<PyBytes>(py){
+                Ok(data) => Ok(PythonReturn::Binary(data.as_bytes().to_vec())),
+                Err(_) => Ok(PythonReturn::Value(depythonize(ret.as_ref(py))?)),
+            }
+        }){
+            Ok(p_return) => match p_return {
+                PythonReturn::Binary(bin) => Ok(bin),
+                PythonReturn::Value(v) => {
+                    match serde_json::to_string(&v){
+                        Ok(v) => Ok(v.as_bytes().to_vec()),
+                        Err(e) => {
+                            let error: UnicomError = e.into();
+                            Err(error.into())
+                        },
+                    }
+                },
+            },
+            Err(e) => Err(e.into()),
         }
+        
     }
 
     pub fn close(&self){
