@@ -84,13 +84,25 @@ impl App{
 
         }).unwrap();
 
-        let ret = p_config_fut.await.unwrap();
+        let ret = match p_config_fut.await{
+            Ok(ret) => ret,
+            Err(e) => {
+                let error: CustomUnicomError = e.into();
+                panic!("config error : {}", error.error.description)
+            },
+        };
 
-        let p_config = Python::with_gil(|py| -> PyResult<PythonConfig> {
+        let p_config = match Python::with_gil(|py| -> PyResult<PythonConfig> {
 
             Ok(ret.extract(py)?)
 
-        }).unwrap();
+        }){
+            Ok(p_config) => p_config,
+            Err(e) => {
+                let error: CustomUnicomError = e.into();
+                panic!("config extract error : {}", error.error.description)
+            },
+        };
 
         let mut api_objects = self.api_objects.lock().await;
         *api_objects = p_config.api_objects;

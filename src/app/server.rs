@@ -69,7 +69,7 @@ impl PythonServer{
     }
 
     #[args(kwargs="**")]
-    fn request<'p>(&self, py: Python<'p>, node: String, api: String, kwargs: Option<&PyDict>) -> PyResult<&'p PyAny> {
+    fn request<'p>(&self, py: Python<'p>, node: String, api: String, method: String, kwargs: Option<&PyDict>) -> PyResult<&'p PyAny> {
         let tx = self.tx.clone();
         let pending = self.pending.clone();
         let mut parameters = Map::new();
@@ -83,6 +83,7 @@ impl PythonServer{
             async move {
                 let mut request = UnicomRequest::new();
                 request.node_name = node;
+                request.method = method.into();
                 request.name = api;
                 request.parameters = parameters;
 
@@ -102,8 +103,10 @@ impl PythonServer{
                         return Err(custom.into())
                     },
                 };
+                let st = String::from_utf8(data)?;
+                //println!("receive raw: {}", st);
 
-                let value: Value = match serde_json::from_str(&String::from_utf8(data)?){
+                let value: Value = match serde_json::from_str(&st){
                     Ok(v) => v,
                     Err(e) => {
                         let error : UnicomError = e.into();
