@@ -1,27 +1,52 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::{sync::Arc, env};
+use std::{sync::Arc, env, time::Duration};
 
 use app::{App, PythonMessage};
 use pyo3::prelude::*;
-use tokio::{net::UnixStream, sync::{Mutex, Notify}, signal};
+use tokio::{net::UnixStream, sync::{Mutex, Notify}, signal, time::sleep};
 
 use unicom_lib::arch::unix::{write_init, read_message, UnixMessage, write_message};
 
 mod app;
 
+extern "C" {
+    pub fn setpgrp() -> ::std::os::raw::c_int;
+}
+
 #[pyo3_asyncio::tokio::main(flavor = "multi_thread", worker_threads = 5)]
 async fn main() -> PyResult<()> {
-    let args: Vec<String> = env::args().collect();
-    let app = Arc::new(App::new(args[1].clone()));
-    let close_notify = Arc::new(Notify::new());
+    unsafe {
+        setpgrp();
+    }
 
-    let n_config = app.initialize().await;
-    
-    let stream = UnixStream::connect("/var/unicom/test3.stream").await.unwrap();
-    let (mut reader,mut writer) = stream.into_split();
-    write_init(&mut writer, &n_config).await.unwrap();
+    let close_notify = Arc::new(Notify::new());
+    let args: Vec<String> = env::args().collect();
+
+    {
+        let close_notify = close_notify.clone();
+        tokio::spawn(async move {
+            signal::ctrl_c().await.unwrap();
+            close_notify.notify_one();
+        });
+    }
+
+    {
+        let close_notify = close_notify.clone();
+        tokio::spawn(async move {
+            let mut stream = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+            stream.recv().await;
+            close_notify.notify_one();
+            println!("receive sigterm");
+        });
+    }
+
+    let (mut reader,mut writer) = UnixStream::connect("/var/unicom/test3.stream").await.unwrap().into_split();
+    let app = Arc::new(App::new(args[1].clone()).await);
+
+    write_init(&mut writer, &app.config).await.expect("write init error");
+
     let writer = Arc::new(Mutex::new(writer));
     let task_exchange;
     {
@@ -101,18 +126,27 @@ async fn main() -> PyResult<()> {
         Ok(())
     }).unwrap_or_default();
 
-    {
-        let close_notify = close_notify.clone();
-        tokio::spawn(async move {
-            signal::ctrl_c().await.unwrap();
-            close_notify.notify_one();
-        });
+    if app.runnable(){
+        Python::with_gil(|py| -> PyResult<()> {
+            let app = app.clone();
+            let close_notify = close_notify.clone();
+            pyo3_asyncio::tokio::future_into_py_with_locals(
+                py,
+                pyo3_asyncio::tokio::get_current_locals(py)?,
+                async move { 
+                    app.run().await;
+                    close_notify.notify_one();
+                    Ok(())
+                }
+            )?;
+            Ok(())
+        }).unwrap_or_default();
     }
 
     close_notify.notified().await;
     
-    app.close();
-
+    app.close().await;
+    sleep(Duration::from_secs(1)).await;
     task_exchange.abort();
 
     Ok(())

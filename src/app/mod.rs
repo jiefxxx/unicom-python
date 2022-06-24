@@ -3,7 +3,7 @@ use pyo3::types::PyBytes;
 use pyo3::{prelude::*, types::PyList, create_exception, exceptions::PyException};
 use pyo3::{PyErr, PyErrArguments};
 use serde_json::Value;
-use tokio::{fs, sync::{Mutex, mpsc::{self,  Receiver}}};
+use tokio::{fs, sync::{Mutex, mpsc::{self,  Receiver, Sender}}};
 use unicom_lib::error::UnicomErrorKind;
 use unicom_lib::{node::{message::request::UnicomRequest, utils::pending::PendingController, NodeConfig}, error::UnicomError};
 use pythonize::{pythonize, depythonize};
@@ -39,84 +39,103 @@ enum PythonReturn{
 }
 
 pub struct App{
-    path: String,
-    api_objects: Mutex<Vec<PyObject>>,
-    close_object: Mutex<Option<PyObject>>,
+    api_objects: Vec<PyObject>,
+    run_object: Option<PyObject>,
+    close_object: Option<PyObject>,
     server: PyObject,
+    pub config: NodeConfig,
     pub rx: Mutex<Receiver<PythonMessage>>,
+    pub tx: Sender<PythonMessage>,
     pub pending: Arc<PendingController>,
     
 }
 
+
+
 impl App{
-    pub fn new(path: String) -> App{
+    pub async fn new(path: String) -> App{
         let (tx, rx) = mpsc::channel(64);
         let pending = Arc::new(PendingController::new());
-        let server = Python::with_gil(|py| -> PyResult<PyObject>{
-            Ok(Py::new(py, PythonServer::new(tx, pending.clone()))?.into_py(py))
-        }).unwrap();
 
-        App{
-            path,
-            api_objects: Mutex::new(Vec::new()),
-            close_object: Mutex::new(None),
-            rx: Mutex::new(rx),
-            pending,
-            server,
-        }
-    }
-
-    pub async fn initialize(&self) -> NodeConfig{
-        let path = Path::new(&self.path);
-        let code = fs::read_to_string(path.join("app.py")).await.unwrap();
-
-        let p_config_fut = Python::with_gil(|py| -> PyResult<_> {
+        let code = fs::read_to_string(Path::new(&path).join("app.py")).await.expect("uneable to read app.py");
+        let (config, run, close) = Python::with_gil(|py| -> PyResult<_> {
 
             py.import("sys")?.getattr("path")?
                 .downcast::<PyList>()?
-                .insert(0, &self.path)?;
+                .insert(0, &path)?;
             
-                let config_fct = PyModule::from_code(py, &code, "app.py", "")?.getattr("config")?;
+                let module = PyModule::from_code(py, &code, "app.py", "")?;
 
-                let fut = pyo3_asyncio::tokio::into_future(config_fct.call((&self.server,), None)?)?;
+                let config = module.getattr("config").expect("config fct error").into_py(py);
+
+                let run = match module.getattr("run"){
+                    Ok(run) => Some(run.into_py(py)),
+                    Err(_) => None,
+                };
+                let close = match module.getattr("close"){
+                    Ok(close) => Some(close.into_py(py)),
+                    Err(_) => None,
+                };
                 
-                Ok(fut)
+                Ok((config, run, close))
 
-        }).unwrap();
+        }).expect("python import error");
 
-        let ret = match p_config_fut.await{
-            Ok(ret) => ret,
-            Err(e) => {
-                let error: CustomUnicomError = e.into();
-                panic!("config error : {}", error.error.description)
-            },
-        };
+        let server = Python::with_gil(|py| -> PyResult<PyObject>{
+            Ok(Py::new(py, PythonServer::new(tx.clone(), pending.clone()))?.into_py(py))
+        }).expect("init server object error");
 
-        let p_config = match Python::with_gil(|py| -> PyResult<PythonConfig> {
+        let ret = Python::with_gil(|py| -> PyResult<_> {
+
+            Ok(pyo3_asyncio::tokio::into_future(config.call1(py, (&server,))?.into_ref(py))?)
+
+        }).expect("call config failed").await.expect("config error");
+
+        let p_config = Python::with_gil(|py| -> PyResult<PythonConfig> {
 
             Ok(ret.extract(py)?)
 
-        }){
-            Ok(p_config) => p_config,
-            Err(e) => {
-                let error: CustomUnicomError = e.into();
-                panic!("config extract error : {}", error.error.description)
-            },
-        };
+        }).expect("config extract error");
 
-        let mut api_objects = self.api_objects.lock().await;
-        *api_objects = p_config.api_objects;
+        App{
+            api_objects: p_config.api_objects,
+            run_object: run,
+            close_object: close,
+            server,
+            config: p_config.config,
+            rx: Mutex::new(rx),
+            pending,
+            tx,
+        }
+    }
 
-        let mut close_object = self.close_object.lock().await;
-        *close_object = p_config.close_object;
+    pub fn runnable(&self) -> bool{
+        if self.run_object.is_none(){
+            false
+        }else{
+            true
+        }
+    }
 
-        p_config.config
+    pub async fn run(&self){
+        if self.run_object.is_none(){
+            return
+        }
+        if let Err(e) = Python::with_gil(|py| -> PyResult<_> {
+
+            Ok(pyo3_asyncio::tokio::into_future(self.run_object.as_ref().unwrap().call1(py, (&self.server,))?.into_ref(py))?)
+
+        }).expect("call run failed").await{
+            let error: CustomUnicomError = e.into();
+            println!("run failed : {}", error.error.description);
+        }
     }
 
     pub async fn execute(&self, request: UnicomRequest) -> Result<Vec<u8>, CustomUnicomError>{
-        let api_objects = self.api_objects.lock().await;
-        let api = api_objects[request.id as usize].clone();
-        drop(api_objects);
+        let api = match self.api_objects.get(request.id as usize){
+            Some(api) => api,
+            None => return Err(UnicomError::new(UnicomErrorKind::NotFound, &format!("api_id not found {}", request.id)).into()),
+        };
 
         let ret = match Python::with_gil(|py| -> PyResult<_> {
             let method: &str = request.method.clone().into();
@@ -155,8 +174,14 @@ impl App{
         
     }
 
-    pub fn close(&self){
-        println!("close app {}", self.path)
+    pub async fn close(&self){
+        self.tx.send(PythonMessage::Quit).await.expect("send quit error");
+        if self.close_object.is_none(){
+            return
+        }
+        Python::with_gil(|py| -> PyResult<_> {
+            pyo3_asyncio::tokio::into_future(self.close_object.as_ref().unwrap().call1(py,(&self.server, ))?.as_ref(py))
+        }).expect("call close failed").await.expect("error on close");
     }
 }
 

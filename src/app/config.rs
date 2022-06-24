@@ -3,8 +3,7 @@ use serde_derive::Deserialize;
 use walkdir::WalkDir;
 
 use pyo3::{prelude::*, types::{PyDict, PyList}};
-use pythonize::depythonize;
-use unicom_lib::{node::{NodeConfig, api::{Parameter, ApiMethod}, endpoint::{EndPointKind, ApiConfig, EndPoint}}, error::UnicomError};
+use unicom_lib::{node::{NodeConfig, api::{Parameter, ApiMethod}, endpoint::{EndPointKind, EndPoint}}, error::UnicomError};
 
 use super::script::PYTHON_SIGNATURE;
 
@@ -79,7 +78,6 @@ impl TryInto<NodeConfig> for ConfigModel {
 pub struct PythonConfig{
     pub config: NodeConfig,
     pub api_objects: Vec<PyObject>,
-    pub close_object: Option<PyObject>,
 }
 
 
@@ -89,21 +87,12 @@ impl PythonConfig{
         PythonConfig { 
             config: config.try_into().unwrap(), 
             api_objects: Vec::new(),
-            close_object: None,
         }
     }
 }
 
 #[pymethods]
 impl PythonConfig{
-
-    pub fn add_close_handler(&mut self, object: PyObject){
-        self.close_object = Some(object);
-    }
-    
-    pub fn add_template(&mut self, file: &str, path: &str){
-        self.config.add_template(file, path);
-    }
 
     pub fn add_api(&mut self, name: String, object: PyObject) -> PyResult<String>{
         let mut methodes = Vec::new();
@@ -135,23 +124,5 @@ impl PythonConfig{
         self.api_objects.push(object);
 
         Ok(name)
-    }
-
-    pub fn add_static(&mut self, regex: String, path: String){
-        self.config.add_endpoint(&regex, EndPointKind::Static { path });
-    }
-
-    pub fn add_dynamic(&mut self, regex: String, api: String){
-        self.config.add_endpoint(&regex, EndPointKind::Dynamic { api });
-    }
-
-    pub fn add_rest(&mut self, regex: String, api: String){
-        self.config.add_endpoint(&regex, EndPointKind::Rest { api });
-    }
-
-    pub fn add_view(&mut self, regex: String, template: String, dict: &PyDict) -> PyResult<()>{
-        let apis: HashMap<String, ApiConfig> = depythonize(dict)?;
-        self.config.add_endpoint(&regex, EndPointKind::View { apis, template });
-        Ok(())
     }
 }
