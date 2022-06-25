@@ -21,4 +21,4 @@ pythonize = "0.16.0"
 pyo3-asyncio = { version = "0.16.0", features = ["attributes", "tokio-runtime"] }
 walkdir = "2.3.2"
 
-unicom-lib = { path = "../unicom-lib" }
+unicom-lib = { git = "https://github.com/jiefxxx/unicom-lib" }

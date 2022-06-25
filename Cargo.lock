@@ -1186,6 +1186,7 @@ checksum = "5bd2fe26506023ed7b5e1e315add59d6f584c621d037f9368fea9cfb988f368c"
 [[package]]
 name = "unicom-lib"
 version = "0.1.0"
+source = "git+https://github.com/jiefxxx/unicom-lib#bbe709611571934a7ec9f1738f922e2cb11c5b0e"
 dependencies = [
  "async-trait",
  "byteorder",
