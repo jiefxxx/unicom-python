@@ -54,6 +54,8 @@ pub struct App{
 
 impl App{
     pub async fn new(path: String) -> App{
+
+        println!("app path {}", path);
         let (tx, rx) = mpsc::channel(64);
         let pending = Arc::new(PendingController::new());
 

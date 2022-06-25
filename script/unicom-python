@@ -2,4 +2,4 @@
 
 cd $1
 . venv/bin/activate
-exec unicom-python-bin ./
+exec unicom-python-bin ./ $2

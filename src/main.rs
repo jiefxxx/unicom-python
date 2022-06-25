@@ -7,7 +7,7 @@ use app::{App, PythonMessage};
 use pyo3::prelude::*;
 use tokio::{net::UnixStream, sync::{Mutex, Notify}, signal, time::sleep};
 
-use unicom_lib::arch::unix::{write_init, read_message, UnixMessage, write_message};
+use unicom_lib::{arch::unix::{write_init, read_message, UnixMessage, write_message}, config::Config};
 
 mod app;
 
@@ -23,6 +23,16 @@ async fn main() -> PyResult<()> {
 
     let close_notify = Arc::new(Notify::new());
     let args: Vec<String> = env::args().collect();
+    let stream_path: String;
+    let app_path: String = args[1].clone();
+    if args.len() <= 1{
+        let content = std::fs::read_to_string("/etc/unicom/config.toml").unwrap();
+        let config: Config = toml::from_str(&content).unwrap();
+        stream_path = config.unix_stream_path.clone();
+    }
+    else{
+        stream_path = args[2].clone();
+    }
 
     {
         let close_notify = close_notify.clone();
@@ -42,8 +52,8 @@ async fn main() -> PyResult<()> {
         });
     }
 
-    let (mut reader,mut writer) = UnixStream::connect("/var/unicom/test3.stream").await.unwrap().into_split();
-    let app = Arc::new(App::new(args[1].clone()).await);
+    let (mut reader,mut writer) = UnixStream::connect(&stream_path).await.unwrap().into_split();
+    let app = Arc::new(App::new(app_path).await);
 
     write_init(&mut writer, &app.config).await.expect("write init error");
 
