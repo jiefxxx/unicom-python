@@ -173,4 +173,17 @@ impl PythonServer{
             }
         )
     }
+
+    pub fn send_bg_worker_thread_safe(& mut self, name: String, object: PyObject) -> PyResult<()>{
+        let data = self.background_worker.get(&name);
+        if data.is_none(){
+            return Err(exceptions::PyTypeError::new_err("no background worker found"))
+        }
+        let data = data.unwrap().clone();
+
+        futures::executor::block_on(data.send(object)).unwrap();
+
+        Ok(())
+    }
+
 }
